@@ -1,0 +1,31 @@
+name: Evaluate Student Submission
+
+on:
+  push:
+    tags:
+      - 'phase1'
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout student submission
+        uses: actions/checkout@v4
+        with:
+          path: student-code
+
+      - name: Checkout private tests repo
+        uses: actions/checkout@v4
+        with:
+          repository: yahia997/private
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: tests-folder
+
+      - name: Setup and Build Student Code
+        run: |
+          cd student-code
+          echo "Building student submission..."
+
+      - name: Run evaluation script
+        run: |
+          python3 tests-folder/hello.py ./student-code/
