@@ -2,7 +2,7 @@ name: Evaluate Student Submission
 
 on:
   repository_dispatch:
-    types: [evaluate_submission]
+    types: [product]
 
 jobs:
   evaluate:
@@ -23,4 +23,4 @@ jobs:
 
       - name: Run evaluation script
         run: |
-          python3 tests-folder/hello.py ./student-code/ ${{ github.event.client_payload.submission_id }}
+          python3 tests-folder/product.py ./student-code/ ${{ github.event.client_payload.submission_id }}
