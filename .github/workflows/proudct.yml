@@ -30,3 +30,10 @@ jobs:
         with:
           name: report-${{ github.event.client_payload.submission_id }}
           path: reports/${{ github.event.client_payload.submission_id }}.json
+
+      - name: Send result to backend
+        run: |
+          curl -X POST ${{ secrets.BACKEND_URL }}/api/submissions/callback \
+            -H "Content-Type: application/json" \
+            -H "X-Callback-Secret: ${{ secrets.CALLBACK_SECRET }}" \
+            -d @reports/${{ github.event.client_payload.submission_id }}.json
