@@ -1,41 +1,91 @@
+name: Evaluate Student Submission
+
+on:
+  repository_dispatch:
+    types: [first_github_repo]
+
 jobs:
   evaluate:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout student submission
+      # ------------------------------------------------------------
+      # 1. Clone student's repository
+      # ------------------------------------------------------------
+      - name: Checkout student repository
         id: checkout
         uses: actions/checkout@v4
+        continue-on-error: true
         with:
           repository: ${{ github.event.client_payload.student_repo_link }}
           path: student-code
-        continue-on-error: true
 
-      - name: Run tests
+      # ------------------------------------------------------------
+      # 2. Evaluate submission
+      #
+      # Replace this step with your own testing logic.
+      # This step MUST generate reports/<submission_id>.json
+      # ------------------------------------------------------------
+      - name: Run evaluation
         if: steps.checkout.outcome == 'success'
         run: |
           mkdir -p reports
+
           SUBMISSION_ID="${{ github.event.client_payload.submission_id }}"
 
+          # --------------------------------------------------------
+          # Example evaluation
+          # --------------------------------------------------------
           if [ -f "student-code/a.txt" ]; then
-            echo "{\"submission_id\":\"$SUBMISSION_ID\",\"passed\":1,\"total\":1,\"results\":{\"message\":\"a.txt found\"}}" > reports/$SUBMISSION_ID.json
+
+            cat > reports/$SUBMISSION_ID.json <<EOF
+          {
+            "submission_id": "$SUBMISSION_ID",
+            "passed": 1,
+            "total": 1,
+            "results": {
+              "message": "a.txt found"
+            }
+          }
+          EOF
+
           else
-            echo "{\"submission_id\":\"$SUBMISSION_ID\",\"passed\":0,\"total\":1,\"results\":{\"message\":\"a.txt not found\"}}" > reports/$SUBMISSION_ID.json
+
+            cat > reports/$SUBMISSION_ID.json <<EOF
+          {
+            "submission_id": "$SUBMISSION_ID",
+            "passed": 0,
+            "total": 1,
+            "results": {
+              "message": "a.txt not found"
+            }
+          }
+          EOF
+
           fi
 
-      - name: Generate error report
-        if: always() && steps.checkout.outcome != 'success'
+      # ------------------------------------------------------------
+      # 3. Repository couldn't be cloned
+      # ------------------------------------------------------------
+      - name: Generate checkout error report
+        if: steps.checkout.outcome != 'success'
         run: |
           mkdir -p reports
+
           SUBMISSION_ID="${{ github.event.client_payload.submission_id }}"
 
-          echo "{
-            \"submission_id\":\"$SUBMISSION_ID\",
-            \"passed\":0,
-            \"total\":0,
-            \"error\":\"Repository could not be cloned.\"
-          }" > reports/$SUBMISSION_ID.json
+          cat > reports/$SUBMISSION_ID.json <<EOF
+          {
+            "submission_id": "$SUBMISSION_ID",
+            "passed": 0,
+            "total": 0,
+            "error": "Repository could not be cloned."
+          }
+          EOF
 
+      # ------------------------------------------------------------
+      # 4. Upload report
+      # ------------------------------------------------------------
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4
@@ -43,10 +93,13 @@ jobs:
           name: report-${{ github.event.client_payload.submission_id }}
           path: reports/${{ github.event.client_payload.submission_id }}.json
 
+      # ------------------------------------------------------------
+      # 5. Notify backend
+      # ------------------------------------------------------------
       - name: Send result to backend
         if: always()
         run: |
-          curl -X POST ${{ secrets.BACKEND_URL }}/api/submissions/callback \
+          curl --fail -X POST "${{ secrets.BACKEND_URL }}/api/submissions/callback" \
             -H "Content-Type: application/json" \
             -H "X-Callback-Secret: ${{ secrets.CALLBACK_SECRET }}" \
             -d @reports/${{ github.event.client_payload.submission_id }}.json
