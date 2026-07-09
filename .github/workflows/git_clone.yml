@@ -1,0 +1,127 @@
+name: Evaluate Student Submission
+
+on:
+  repository_dispatch:
+    types: [git_clone]
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ------------------------------------------------------------
+      # 1. Clone student's repository
+      # ------------------------------------------------------------
+      - name: Checkout student repository
+        id: checkout
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: ${{ github.event.client_payload.student_repo_link }}
+          path: student-code
+
+      # ------------------------------------------------------------
+      # 2. Clone reference libgit2 repo for comparison
+      # ------------------------------------------------------------
+      - name: Clone reference repository
+        id: reference
+        if: steps.checkout.outcome == 'success'
+        continue-on-error: true
+        run: git clone --depth 1 https://github.com/libgit2/libgit2.git reference-code
+
+      # ------------------------------------------------------------
+      # 3. Evaluate submission
+      # ------------------------------------------------------------
+      - name: Run evaluation
+        if: steps.checkout.outcome == 'success' && steps.reference.outcome == 'success'
+        run: |
+          mkdir -p reports
+          SUBMISSION_ID="${{ github.event.client_payload.submission_id }}"
+
+          PASSED=0
+          TOTAL=3
+
+          # Check 1: key libgit2 files/folders exist
+          if [ -f "student-code/include/git2.h" ] && [ -d "student-code/src" ] && [ -f "student-code/CMakeLists.txt" ]; then
+            CHECK1=true
+            PASSED=$((PASSED+1))
+          else
+            CHECK1=false
+          fi
+
+          # Check 2: checksum of a stable, unlikely-to-be-edited file matches upstream
+          if [ -f "student-code/COPYING" ] && [ -f "reference-code/COPYING" ]; then
+            HASH_STUDENT=$(sha256sum student-code/COPYING | awk '{print $1}')
+            HASH_REF=$(sha256sum reference-code/COPYING | awk '{print $1}')
+            if [ "$HASH_STUDENT" == "$HASH_REF" ]; then
+              CHECK2=true
+              PASSED=$((PASSED+1))
+            else
+              CHECK2=false
+            fi
+          else
+            CHECK2=false
+          fi
+
+          # Check 3: total file count is close to the reference repo's
+          STUDENT_COUNT=$(find student-code -type f | wc -l)
+          REF_COUNT=$(find reference-code -type f | wc -l)
+          DIFF=$(( STUDENT_COUNT > REF_COUNT ? STUDENT_COUNT - REF_COUNT : REF_COUNT - STUDENT_COUNT ))
+          if [ "$DIFF" -le 5 ]; then
+            CHECK3=true
+            PASSED=$((PASSED+1))
+          else
+            CHECK3=false
+          fi
+
+          cat > reports/$SUBMISSION_ID.json <<EOF
+          {
+            "submission_id": "$SUBMISSION_ID",
+            "passed": $PASSED,
+            "total": $TOTAL,
+            "results": {
+              "key_files_exist": $CHECK1,
+              "license_checksum_match": $CHECK2,
+              "file_count_close": $CHECK3
+            }
+          }
+          EOF
+
+      # ------------------------------------------------------------
+      # 4. Repository couldn't be cloned (student or reference)
+      # ------------------------------------------------------------
+      - name: Generate checkout error report
+        if: steps.checkout.outcome != 'success' || steps.reference.outcome != 'success'
+        run: |
+          mkdir -p reports
+          SUBMISSION_ID="${{ github.event.client_payload.submission_id }}"
+
+          cat > reports/$SUBMISSION_ID.json <<EOF
+          {
+            "submission_id": "$SUBMISSION_ID",
+            "passed": 0,
+            "total": 0,
+            "error": "Repository could not be cloned or reference repo unavailable."
+          }
+          EOF
+
+      # ------------------------------------------------------------
+      # 5. Upload report
+      # ------------------------------------------------------------
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-${{ github.event.client_payload.submission_id }}
+          path: reports/${{ github.event.client_payload.submission_id }}.json
+
+      # ------------------------------------------------------------
+      # 6. Notify backend
+      # ------------------------------------------------------------
+      - name: Send result to backend
+        if: always()
+        run: |
+          curl --fail -X POST "${{ secrets.BACKEND_URL }}/api/submissions/callback" \
+            -H "Content-Type: application/json" \
+            -H "X-Callback-Secret: ${{ secrets.CALLBACK_SECRET }}" \
+            -d @reports/${{ github.event.client_payload.submission_id }}.json

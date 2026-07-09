@@ -48,7 +48,7 @@ To change this project into a git repo, type the following command in your termi
 git init
 ```
 
-`git init` tells Git "start tracking this folder." You'll see a message confirming an empty repository was created.
+This creates a new subdirectory named `.git` that contains all of your necessary repository files a Git repository skeleton. At this point, nothing in your project is tracked yet.
 
 ### Track your files
 This phase is called **Staging** as we described earlier. Use the following command to tell git which files to track.

@@ -17,7 +17,7 @@ Each project is divided into multiple phases, allowing students to progress step
 │       ├── first_github_repo.yml
 │       ├── ...
 │
-├── git_github
+├── project1
 │   ├── phase1
 │   │   └── README.md
 │   ├── phase2
