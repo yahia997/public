@@ -98,8 +98,8 @@ GitHub will show you a URL like `https://github.com/yourusername/your-repo.git`.
 git remote set-url origin https://github.com/yourusername/your-repo.git
 
 # we will explain the concept of branching later
-git branch -M main # makes sure you are on the "main" branch
-git push -u origin main # uploads your commit to your own GitHub repo
+git branch -M master # makes sure you are on the "master" branch
+git push -u origin master # uploads your commit to your own GitHub repo
 ```
 
 Refresh your GitHub page — your files should now appear online. 🎉
