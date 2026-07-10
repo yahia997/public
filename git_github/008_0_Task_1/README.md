@@ -53,14 +53,14 @@ nothing to commit, working tree clean
 This means every file Git knows about is unmodified — nothing's changed since the last commit.
 
 ### Add content to your project
-To be able to see what is going on we will add a text file with some content, inside a folder called `git_github`.
+To be able to see what is going on we will add a text file with some content.
 ```bash
-mkdir git_github # create the folder (skip if it already exists)
-cd git_github
 touch a.txt # create a new file
 echo "Hello, world!" > a.txt # overwrite content of "a.txt" to be "Hello, world!"
 cd .. # move back to the project's root
 ```
+
+Ensure that `a.txt` is inside the root directory of the repo.
 
 > Now type `git status` again. Notice `a.txt` shows up as **untracked** — Git sees the file, but isn't tracking changes to it yet.
 
