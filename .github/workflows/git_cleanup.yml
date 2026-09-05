@@ -2,7 +2,7 @@ name: Evaluate Student Submission
 
 on:
   repository_dispatch:
-    types: [first_github_repo]
+    types: [git_cleanup]
 
 jobs:
   evaluate:
@@ -24,46 +24,69 @@ jobs:
       # ------------------------------------------------------------
       # 2. Evaluate submission
       #
-      # Replace this step with your own testing logic.
-      # This step MUST generate reports/<submission_id>.json
+      # Checks:
+      #   - debug.log does not exist in the final snapshot
+      #   - notes.txt is gone and project-notes.txt exists (renamed)
+      #   - .gitignore exists and contains a pattern matching .env
+      #   - .env never appears anywhere in the full commit history
       # ------------------------------------------------------------
       - name: Run evaluation
         if: steps.checkout.outcome == 'success'
+        working-directory: student-code
         run: |
-          mkdir -p reports
+          mkdir -p ../reports
 
           SUBMISSION_ID="${{ github.event.client_payload.submission_id }}"
 
-          # --------------------------------------------------------
-          # Example evaluation
-          # --------------------------------------------------------
-          if [ -f "student-code/a.txt" ]; then
+          PASSED=0
+          TOTAL=4
 
-            cat > reports/$SUBMISSION_ID.json <<EOF
-          {
-            "submission_id": "$SUBMISSION_ID",
-            "passed": 1,
-            "total": 1,
-            "results": {
-              "message": "a.txt found"
-            }
-          }
-          EOF
-
+          # Check 1: debug.log removed from the latest snapshot
+          if [ ! -f "debug.log" ]; then
+            DEBUG_CHECK="true"
+            PASSED=$((PASSED + 1))
           else
+            DEBUG_CHECK="false"
+          fi
 
-            cat > reports/$SUBMISSION_ID.json <<EOF
+          # Check 2: notes.txt renamed to project-notes.txt
+          if [ ! -f "notes.txt" ] && [ -f "project-notes.txt" ]; then
+            RENAME_CHECK="true"
+            PASSED=$((PASSED + 1))
+          else
+            RENAME_CHECK="false"
+          fi
+
+          # Check 3: .gitignore exists and ignores .env
+          if [ -f ".gitignore" ] && grep -q "\.env" ".gitignore"; then
+            GITIGNORE_CHECK="true"
+            PASSED=$((PASSED + 1))
+          else
+            GITIGNORE_CHECK="false"
+          fi
+
+          # Check 4: .env never committed, anywhere in history
+          ENV_IN_HISTORY=$(git log --all --full-history -- .env)
+          if [ -z "$ENV_IN_HISTORY" ]; then
+            ENV_CHECK="true"
+            PASSED=$((PASSED + 1))
+          else
+            ENV_CHECK="false"
+          fi
+
+          cat > ../reports/$SUBMISSION_ID.json <<EOF
           {
             "submission_id": "$SUBMISSION_ID",
-            "passed": 0,
-            "total": 1,
+            "passed": $PASSED,
+            "total": $TOTAL,
             "results": {
-              "message": "a.txt not found"
+              "debug_log_removed": $DEBUG_CHECK,
+              "file_renamed": $RENAME_CHECK,
+              "gitignore_covers_env": $GITIGNORE_CHECK,
+              "env_never_committed": $ENV_CHECK
             }
           }
           EOF
-
-          fi
 
       # ------------------------------------------------------------
       # 3. Repository couldn't be cloned
@@ -79,7 +102,7 @@ jobs:
           {
             "submission_id": "$SUBMISSION_ID",
             "passed": 0,
-            "total": 0,
+            "total": 4,
             "error": "Repository could not be cloned."
           }
           EOF

@@ -1,0 +1,122 @@
+name: Evaluate Student Submission
+
+on:
+  repository_dispatch:
+    types: [git_revert]
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ------------------------------------------------------------
+      # 1. Clone student's repository
+      # ------------------------------------------------------------
+      - name: Checkout student repository
+        id: checkout
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: ${{ github.event.client_payload.student_repo_link }}
+          path: student-code
+          fetch-depth: 0
+
+      # ------------------------------------------------------------
+      # 2. Evaluate submission
+      #
+      # Checks that a commit exists whose message starts with "Revert"
+      # (Git's default revert commit message), and that the commit
+      # hash it references actually exists in the repo's history.
+      # ------------------------------------------------------------
+      - name: Run evaluation
+        if: steps.checkout.outcome == 'success'
+        working-directory: student-code
+        run: |
+          mkdir -p ../reports
+
+          SUBMISSION_ID="${{ github.event.client_payload.submission_id }}"
+
+          # Find the first commit whose message starts with "Revert"
+          REVERT_LINE=$(git log --grep="^Revert" --pretty=format:"%H %s" -i | head -n 1)
+
+          if [ -z "$REVERT_LINE" ]; then
+            cat > ../reports/$SUBMISSION_ID.json <<EOF
+          {
+            "submission_id": "$SUBMISSION_ID",
+            "passed": 0,
+            "total": 1,
+            "results": {
+              "message": "No revert commit found. Expected a commit message starting with 'Revert'."
+            }
+          }
+          EOF
+            exit 0
+          fi
+
+          # Extract the reverted commit hash from the default message,
+          # e.g. 'Revert "some message" (a1b2c3d...)' -> a1b2c3d
+          REVERTED_HASH=$(echo "$REVERT_LINE" | grep -oE '[a-f0-9]{7,40}' | tail -n 1)
+
+          if [ -n "$REVERTED_HASH" ] && git cat-file -e "$REVERTED_HASH" 2>/dev/null; then
+            cat > ../reports/$SUBMISSION_ID.json <<EOF
+          {
+            "submission_id": "$SUBMISSION_ID",
+            "passed": 1,
+            "total": 1,
+            "results": {
+              "message": "Revert commit found and the original commit is still present in history."
+            }
+          }
+          EOF
+          else
+            cat > ../reports/$SUBMISSION_ID.json <<EOF
+          {
+            "submission_id": "$SUBMISSION_ID",
+            "passed": 0,
+            "total": 1,
+            "results": {
+              "message": "Revert commit found, but could not confirm the original commit still exists in history."
+            }
+          }
+          EOF
+          fi
+
+      # ------------------------------------------------------------
+      # 3. Repository couldn't be cloned
+      # ------------------------------------------------------------
+      - name: Generate checkout error report
+        if: steps.checkout.outcome != 'success'
+        run: |
+          mkdir -p reports
+
+          SUBMISSION_ID="${{ github.event.client_payload.submission_id }}"
+
+          cat > reports/$SUBMISSION_ID.json <<EOF
+          {
+            "submission_id": "$SUBMISSION_ID",
+            "passed": 0,
+            "total": 1,
+            "error": "Repository could not be cloned."
+          }
+          EOF
+
+      # ------------------------------------------------------------
+      # 4. Upload report
+      # ------------------------------------------------------------
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-${{ github.event.client_payload.submission_id }}
+          path: reports/${{ github.event.client_payload.submission_id }}.json
+
+      # ------------------------------------------------------------
+      # 5. Notify backend
+      # ------------------------------------------------------------
+      - name: Send result to backend
+        if: always()
+        run: |
+          curl --fail -X POST "${{ secrets.BACKEND_URL }}/api/submissions/callback" \
+            -H "Content-Type: application/json" \
+            -H "X-Callback-Secret: ${{ secrets.CALLBACK_SECRET }}" \
+            -d @reports/${{ github.event.client_payload.submission_id }}.json
