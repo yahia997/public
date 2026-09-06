@@ -1,0 +1,135 @@
+name: Evaluate Student Submission
+
+on:
+  repository_dispatch:
+    types: [git_hotfix]
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ------------------------------------------------------------
+      # 1. Clone student's repository
+      # ------------------------------------------------------------
+      - name: Checkout student repository
+        id: checkout
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: ${{ github.event.client_payload.student_repo_link }}
+          path: student-code
+          fetch-depth: 0
+
+      # ------------------------------------------------------------
+      # 2. Evaluate submission
+      #
+      # Checks:
+      #   - hotfix/urgent-fix branch exists on the remote with a commit
+      #   - that same commit's message appears on at least one OTHER
+      #     branch too (cherry-pick creates a new hash but keeps the
+      #     original commit message by default, so matching by message
+      #     is how we detect "this commit exists in two places")
+      #
+      # The stash/pop step isn't checked — like earlier phases, an
+      # uncommitted change that gets stashed and popped back leaves
+      # no trace once it's restored.
+      # ------------------------------------------------------------
+      - name: Run evaluation
+        if: steps.checkout.outcome == 'success'
+        working-directory: student-code
+        run: |
+          mkdir -p ../reports
+
+          SUBMISSION_ID="${{ github.event.client_payload.submission_id }}"
+          HOTFIX_BRANCH="hotfix/urgent-fix"
+
+          PASSED=0
+          TOTAL=2
+
+          # Check 1: hotfix branch exists on remote
+          if git ls-remote --heads origin "$HOTFIX_BRANCH" | grep -q "$HOTFIX_BRANCH"; then
+            BRANCH_CHECK="true"
+            PASSED=$((PASSED + 1))
+          else
+            BRANCH_CHECK="false"
+          fi
+
+          CHERRY_PICK_CHECK="false"
+
+          if [ "$BRANCH_CHECK" = "true" ]; then
+            # Get the message of the latest commit unique to the hotfix branch
+            # (the commit made directly on hotfix/urgent-fix, not inherited from main)
+            HOTFIX_MSG=$(git log "origin/main..origin/$HOTFIX_BRANCH" --pretty=%s | tail -n 1)
+
+            if [ -n "$HOTFIX_MSG" ]; then
+              # Check every other remote branch for a commit with the same message
+              for BRANCH in $(git branch -r | grep -v "HEAD" | sed 's#origin/##'); do
+                if [ "$BRANCH" = "$HOTFIX_BRANCH" ] || [ "$BRANCH" = "main" ]; then
+                  continue
+                fi
+
+                MATCH=$(git log "origin/$BRANCH" --pretty=%s | grep -F "$HOTFIX_MSG" || true)
+                if [ -n "$MATCH" ]; then
+                  CHERRY_PICK_CHECK="true"
+                  break
+                fi
+              done
+            fi
+          fi
+
+          if [ "$CHERRY_PICK_CHECK" = "true" ]; then
+            PASSED=$((PASSED + 1))
+          fi
+
+          cat > ../reports/$SUBMISSION_ID.json <<EOF
+          {
+            "submission_id": "$SUBMISSION_ID",
+            "passed": $PASSED,
+            "total": $TOTAL,
+            "results": {
+              "hotfix_branch_exists": $BRANCH_CHECK,
+              "commit_cherry_picked_elsewhere": $CHERRY_PICK_CHECK
+            }
+          }
+          EOF
+
+      # ------------------------------------------------------------
+      # 3. Repository couldn't be cloned
+      # ------------------------------------------------------------
+      - name: Generate checkout error report
+        if: steps.checkout.outcome != 'success'
+        run: |
+          mkdir -p reports
+
+          SUBMISSION_ID="${{ github.event.client_payload.submission_id }}"
+
+          cat > reports/$SUBMISSION_ID.json <<EOF
+          {
+            "submission_id": "$SUBMISSION_ID",
+            "passed": 0,
+            "total": 2,
+            "error": "Repository could not be cloned."
+          }
+          EOF
+
+      # ------------------------------------------------------------
+      # 4. Upload report
+      # ------------------------------------------------------------
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-${{ github.event.client_payload.submission_id }}
+          path: reports/${{ github.event.client_payload.submission_id }}.json
+
+      # ------------------------------------------------------------
+      # 5. Notify backend
+      # ------------------------------------------------------------
+      - name: Send result to backend
+        if: always()
+        run: |
+          curl --fail -X POST "${{ secrets.BACKEND_URL }}/api/submissions/callback" \
+            -H "Content-Type: application/json" \
+            -H "X-Callback-Secret: ${{ secrets.CALLBACK_SECRET }}" \
+            -d @reports/${{ github.event.client_payload.submission_id }}.json

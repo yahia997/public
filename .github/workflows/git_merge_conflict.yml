@@ -1,0 +1,124 @@
+name: Evaluate Student Submission
+
+on:
+  repository_dispatch:
+    types: [git_merge_conflict]
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ------------------------------------------------------------
+      # 1. Clone student's repository
+      # ------------------------------------------------------------
+      - name: Checkout student repository
+        id: checkout
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: ${{ github.event.client_payload.student_repo_link }}
+          path: student-code
+          fetch-depth: 0
+
+      # ------------------------------------------------------------
+      # 2. Evaluate submission
+      #
+      # Checks:
+      #   - no conflict markers remain anywhere in the current files
+      #   - a merge commit exists on main with 2 parents (an actual merge,
+      #     not a fast-forward)
+      #   - conflict-practice branch exists on the remote
+      # ------------------------------------------------------------
+      - name: Run evaluation
+        if: steps.checkout.outcome == 'success'
+        working-directory: student-code
+        run: |
+          mkdir -p ../reports
+
+          SUBMISSION_ID="${{ github.event.client_payload.submission_id }}"
+
+          PASSED=0
+          TOTAL=3
+
+          # Check 1: conflict-practice branch exists on remote
+          if git ls-remote --heads origin "conflict-practice" | grep -q "conflict-practice"; then
+            BRANCH_CHECK="true"
+            PASSED=$((PASSED + 1))
+          else
+            BRANCH_CHECK="false"
+          fi
+
+          # Check 2: no conflict markers left in any tracked file on main
+          git checkout origin/main -- . 2>/dev/null || true
+          if grep -rlE "^(<{7}|={7}|>{7})" --include="*" . --exclude-dir=.git | grep -q .; then
+            MARKERS_CHECK="false"
+          else
+            MARKERS_CHECK="true"
+          fi
+
+          # Check 3: a real merge commit exists on main (2+ parents)
+          MERGE_COMMIT=$(git log origin/main --merges --oneline | head -n 1)
+          if [ -n "$MERGE_COMMIT" ]; then
+            MERGE_CHECK="true"
+            PASSED=$((PASSED + 1))
+          else
+            MERGE_CHECK="false"
+          fi
+
+          if [ "$MARKERS_CHECK" = "true" ]; then
+            PASSED=$((PASSED + 1))
+          fi
+
+          cat > ../reports/$SUBMISSION_ID.json <<EOF
+          {
+            "submission_id": "$SUBMISSION_ID",
+            "passed": $PASSED,
+            "total": $TOTAL,
+            "results": {
+              "branch_exists": $BRANCH_CHECK,
+              "no_conflict_markers": $MARKERS_CHECK,
+              "merge_commit_exists": $MERGE_CHECK
+            }
+          }
+          EOF
+
+      # ------------------------------------------------------------
+      # 3. Repository couldn't be cloned
+      # ------------------------------------------------------------
+      - name: Generate checkout error report
+        if: steps.checkout.outcome != 'success'
+        run: |
+          mkdir -p reports
+
+          SUBMISSION_ID="${{ github.event.client_payload.submission_id }}"
+
+          cat > reports/$SUBMISSION_ID.json <<EOF
+          {
+            "submission_id": "$SUBMISSION_ID",
+            "passed": 0,
+            "total": 3,
+            "error": "Repository could not be cloned."
+          }
+          EOF
+
+      # ------------------------------------------------------------
+      # 4. Upload report
+      # ------------------------------------------------------------
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-${{ github.event.client_payload.submission_id }}
+          path: reports/${{ github.event.client_payload.submission_id }}.json
+
+      # ------------------------------------------------------------
+      # 5. Notify backend
+      # ------------------------------------------------------------
+      - name: Send result to backend
+        if: always()
+        run: |
+          curl --fail -X POST "${{ secrets.BACKEND_URL }}/api/submissions/callback" \
+            -H "Content-Type: application/json" \
+            -H "X-Callback-Secret: ${{ secrets.CALLBACK_SECRET }}" \
+            -d @reports/${{ github.event.client_payload.submission_id }}.json

@@ -1,0 +1,125 @@
+name: Evaluate Student Submission
+
+on:
+  repository_dispatch:
+    types: [git_readme]
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ------------------------------------------------------------
+      # 1. Clone student's repository
+      # ------------------------------------------------------------
+      - name: Checkout student repository
+        id: checkout
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: ${{ github.event.client_payload.student_repo_link }}
+          path: student-code
+
+      # ------------------------------------------------------------
+      # 2. Evaluate submission
+      #
+      # Checks:
+      #   - README.md exists at the repo root
+      #   - it has a top-level header (#)
+      #   - it has at least one subheading (##)
+      #   - it has enough content overall (not just a title)
+      # ------------------------------------------------------------
+      - name: Run evaluation
+        if: steps.checkout.outcome == 'success'
+        working-directory: student-code
+        run: |
+          mkdir -p ../reports
+
+          SUBMISSION_ID="${{ github.event.client_payload.submission_id }}"
+
+          PASSED=0
+          TOTAL=3
+
+          # Check 1: README.md exists
+          if [ -f "README.md" ]; then
+            EXISTS_CHECK="true"
+            PASSED=$((PASSED + 1))
+          else
+            EXISTS_CHECK="false"
+          fi
+
+          # Check 2: has a top-level header AND a subheading
+          if [ -f "README.md" ] && grep -qE "^# " README.md && grep -qE "^## " README.md; then
+            HEADERS_CHECK="true"
+            PASSED=$((PASSED + 1))
+          else
+            HEADERS_CHECK="false"
+          fi
+
+          # Check 3: enough content overall (at least 5 characters)
+          if [ -f "README.md" ]; then
+            CONTENT_LENGTH=$(wc -c < README.md)
+          else
+            CONTENT_LENGTH=0
+          fi
+
+          if [ "$CONTENT_LENGTH" -ge 5 ]; then
+            LENGTH_CHECK="true"
+            PASSED=$((PASSED + 1))
+          else
+            LENGTH_CHECK="false"
+          fi
+
+          cat > ../reports/$SUBMISSION_ID.json <<EOF
+          {
+            "submission_id": "$SUBMISSION_ID",
+            "passed": $PASSED,
+            "total": $TOTAL,
+            "results": {
+              "readme_exists": $EXISTS_CHECK,
+              "has_header_and_subheading": $HEADERS_CHECK,
+              "content_length_ok": $LENGTH_CHECK,
+              "content_length": $CONTENT_LENGTH
+            }
+          }
+          EOF
+
+      # ------------------------------------------------------------
+      # 3. Repository couldn't be cloned
+      # ------------------------------------------------------------
+      - name: Generate checkout error report
+        if: steps.checkout.outcome != 'success'
+        run: |
+          mkdir -p reports
+
+          SUBMISSION_ID="${{ github.event.client_payload.submission_id }}"
+
+          cat > reports/$SUBMISSION_ID.json <<EOF
+          {
+            "submission_id": "$SUBMISSION_ID",
+            "passed": 0,
+            "total": 3,
+            "error": "Repository could not be cloned."
+          }
+          EOF
+
+      # ------------------------------------------------------------
+      # 4. Upload report
+      # ------------------------------------------------------------
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-${{ github.event.client_payload.submission_id }}
+          path: reports/${{ github.event.client_payload.submission_id }}.json
+
+      # ------------------------------------------------------------
+      # 5. Notify backend
+      # ------------------------------------------------------------
+      - name: Send result to backend
+        if: always()
+        run: |
+          curl --fail -X POST "${{ secrets.BACKEND_URL }}/api/submissions/callback" \
+            -H "Content-Type: application/json" \
+            -H "X-Callback-Secret: ${{ secrets.CALLBACK_SECRET }}" \
+            -d @reports/${{ github.event.client_payload.submission_id }}.json
