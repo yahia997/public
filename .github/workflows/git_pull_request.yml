@@ -10,142 +10,23 @@ jobs:
 
     steps:
       # ------------------------------------------------------------
-      # 1. Evaluate submission via the GitHub API
+      # 1. Query GitHub API for the student's pull requests
       #
       # A PR isn't something you find by cloning the repo — it's
-      # GitHub metadata, so we query the REST API directly instead
-      # of checking out any code.
-      #
-      # Checks:
-      #   - at least one merged PR exists targeting main
-      #   - it has a non-empty title
-      #   - it has a non-empty description (body)
+      # GitHub metadata, so this step queries the REST API directly
+      # instead of checking out any code. continue-on-error lets us
+      # handle a failed/malformed API response the same way the other
+      # workflows handle a failed checkout.
       # ------------------------------------------------------------
-      - name: Run evaluation
-        id: evaluate
+      - name: Fetch pull requests
+        id: fetch
+        continue-on-error: true
         run: |
-          mkdir -p reports
-
           SUBMISSION_ID="${{ github.event.client_payload.submission_id }}"
           REPO_LINK="${{ github.event.client_payload.student_repo_link }}"
 
-          # Extract "owner/repo" from a full GitHub URL
           REPO_SLUG=$(echo "$REPO_LINK" | sed -E 's#(https?://)?(www\.)?github\.com/##' | sed -E 's#\.git$##' | sed -E 's#/$##')
-
           API_URL="https://api.github.com/repos/${REPO_SLUG}/pulls?state=closed&base=main"
 
-          # Capture body + HTTP status together, then split them apart
           RAW=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
-                     -H "Authorization: Bearer ${{ secrets.GH_API_TOKEN }}" \
-                     -H "Accept: application/vnd.github+json" \
-                     "$API_URL")
-
-          HTTP_STATUS=$(echo "$RAW" | grep "HTTP_STATUS:" | cut -d: -f2)
-          RESPONSE=$(echo "$RAW" | sed '/HTTP_STATUS:/d')
-
-          echo "DEBUG: repo slug was: $REPO_SLUG"
-          echo "DEBUG: HTTP status was: $HTTP_STATUS"
-          echo "DEBUG: raw response was: $RESPONSE"
-
-          # Guard: bail cleanly if the response isn't the JSON array we expect
-          if ! echo "$RESPONSE" | jq -e 'type == "array"' > /dev/null 2>&1; then
-            ERROR_MSG=$(echo "$RESPONSE" | jq -r '.message // "Unrecognized response from GitHub API"' 2>/dev/null || echo "Unrecognized response")
-            cat > reports/$SUBMISSION_ID.json <<EOF
-          {
-            "submission_id": "$SUBMISSION_ID",
-            "passed": 0,
-            "total": 3,
-            "error": "GitHub API request failed (HTTP $HTTP_STATUS): $ERROR_MSG"
-          }
-          EOF
-            exit 0
-          fi
-
-          if [ "$RESPONSE" = "[]" ]; then
-            cat > reports/$SUBMISSION_ID.json <<EOF
-          {
-            "submission_id": "$SUBMISSION_ID",
-            "passed": 0,
-            "total": 3,
-            "error": "No closed pull requests targeting main were found."
-          }
-          EOF
-            exit 0
-          fi
-
-          # Pick the first merged PR (merged_at is not null)
-          MERGED_PR=$(echo "$RESPONSE" | jq '[.[] | select(.merged_at != null)] | first')
-
-          if [ "$MERGED_PR" = "null" ] || [ -z "$MERGED_PR" ]; then
-            cat > reports/$SUBMISSION_ID.json <<EOF
-          {
-            "submission_id": "$SUBMISSION_ID",
-            "passed": 0,
-            "total": 3,
-            "results": {
-              "merged_pr_found": false
-            },
-            "error": "Pull requests were found, but none have been merged."
-          }
-          EOF
-            exit 0
-          fi
-
-          TITLE=$(echo "$MERGED_PR" | jq -r '.title')
-          BODY=$(echo "$MERGED_PR" | jq -r '.body // ""')
-
-          PASSED=1
-          TOTAL=3
-
-          if [ -n "$TITLE" ] && [ "$TITLE" != "null" ]; then
-            TITLE_CHECK="true"
-            PASSED=$((PASSED + 1))
-          else
-            TITLE_CHECK="false"
-          fi
-
-          if [ -n "$BODY" ] && [ "$BODY" != "null" ] && [ ${#BODY} -ge 10 ]; then
-            BODY_CHECK="true"
-            PASSED=$((PASSED + 1))
-          else
-            BODY_CHECK="false"
-          fi
-
-          cat > reports/$SUBMISSION_ID.json <<EOF
-          {
-            "submission_id": "$SUBMISSION_ID",
-            "passed": $PASSED,
-            "total": $TOTAL,
-            "results": {
-              "merged_pr_found": true,
-              "has_title": $TITLE_CHECK,
-              "has_description": $BODY_CHECK,
-              "pr_title": $(echo "$TITLE" | jq -R .)
-            }
-          }
-          EOF
-
-      # ------------------------------------------------------------
-      # 2. Upload report
-      # ------------------------------------------------------------
-      - name: Upload report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: report-${{ github.event.client_payload.submission_id }}
-          path: reports/${{ github.event.client_payload.submission_id }}.json
-
-      # ------------------------------------------------------------
-      # 3. Notify backend
-      # ------------------------------------------------------------
-      - name: Send result to backend
-        if: always()
-        run: |
-          if [ -f "reports/${{ github.event.client_payload.submission_id }}.json" ]; then
-            curl --fail -X POST "${{ secrets.BACKEND_URL }}/api/submissions/callback" \
-              -H "Content-Type: application/json" \
-              -H "X-Callback-Secret: ${{ secrets.CALLBACK_SECRET }}" \
-              -d @reports/${{ github.event.client_payload.submission_id }}.json
-          else
-            echo "No report file found — evaluation step may have failed unexpectedly."
-          fi
+                     -H "Authorization: Bearer ${{ secrets.GH_API_TOKEN
