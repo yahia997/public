@@ -12,9 +12,9 @@ jobs:
       # ------------------------------------------------------------
       # 1. Evaluate submission via the GitHub API
       #
-      # Unlike previous phases, a PR isn't something you find by
-      # cloning the repo — it's GitHub metadata, so we query the API
-      # directly instead of checking out the code.
+      # A PR isn't something you find by cloning the repo — it's
+      # GitHub metadata, so we query the REST API directly instead
+      # of checking out any code.
       #
       # Checks:
       #   - at least one merged PR exists targeting main
@@ -34,11 +34,34 @@ jobs:
 
           API_URL="https://api.github.com/repos/${REPO_SLUG}/pulls?state=closed&base=main"
 
-          RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.GH_API_TOKEN }}" \
-                           -H "Accept: application/vnd.github+json" \
-                           "$API_URL")
+          # Capture body + HTTP status together, then split them apart
+          RAW=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
+                     -H "Authorization: Bearer ${{ secrets.GH_API_TOKEN }}" \
+                     -H "Accept: application/vnd.github+json" \
+                     "$API_URL")
 
-          if [ -z "$RESPONSE" ] || [ "$RESPONSE" = "[]" ]; then
+          HTTP_STATUS=$(echo "$RAW" | grep "HTTP_STATUS:" | cut -d: -f2)
+          RESPONSE=$(echo "$RAW" | sed '/HTTP_STATUS:/d')
+
+          echo "DEBUG: repo slug was: $REPO_SLUG"
+          echo "DEBUG: HTTP status was: $HTTP_STATUS"
+          echo "DEBUG: raw response was: $RESPONSE"
+
+          # Guard: bail cleanly if the response isn't the JSON array we expect
+          if ! echo "$RESPONSE" | jq -e 'type == "array"' > /dev/null 2>&1; then
+            ERROR_MSG=$(echo "$RESPONSE" | jq -r '.message // "Unrecognized response from GitHub API"' 2>/dev/null || echo "Unrecognized response")
+            cat > reports/$SUBMISSION_ID.json <<EOF
+          {
+            "submission_id": "$SUBMISSION_ID",
+            "passed": 0,
+            "total": 3,
+            "error": "GitHub API request failed (HTTP $HTTP_STATUS): $ERROR_MSG"
+          }
+          EOF
+            exit 0
+          fi
+
+          if [ "$RESPONSE" = "[]" ]; then
             cat > reports/$SUBMISSION_ID.json <<EOF
           {
             "submission_id": "$SUBMISSION_ID",
@@ -118,7 +141,11 @@ jobs:
       - name: Send result to backend
         if: always()
         run: |
-          curl --fail -X POST "${{ secrets.BACKEND_URL }}/api/submissions/callback" \
-            -H "Content-Type: application/json" \
-            -H "X-Callback-Secret: ${{ secrets.CALLBACK_SECRET }}" \
-            -d @reports/${{ github.event.client_payload.submission_id }}.json
+          if [ -f "reports/${{ github.event.client_payload.submission_id }}.json" ]; then
+            curl --fail -X POST "${{ secrets.BACKEND_URL }}/api/submissions/callback" \
+              -H "Content-Type: application/json" \
+              -H "X-Callback-Secret: ${{ secrets.CALLBACK_SECRET }}" \
+              -d @reports/${{ github.event.client_payload.submission_id }}.json
+          else
+            echo "No report file found — evaluation step may have failed unexpectedly."
+          fi
