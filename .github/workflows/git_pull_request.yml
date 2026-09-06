@@ -29,4 +29,139 @@ jobs:
           API_URL="https://api.github.com/repos/${REPO_SLUG}/pulls?state=closed&base=main"
 
           RAW=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
-                     -H "Authorization: Bearer ${{ secrets.GH_API_TOKEN
+                     -H "Authorization: Bearer ${{ secrets.GH_API_TOKEN }}" \
+                     -H "Accept: application/vnd.github+json" \
+                     "$API_URL")
+
+          HTTP_STATUS=$(echo "$RAW" | grep "HTTP_STATUS:" | cut -d: -f2)
+          RESPONSE=$(echo "$RAW" | sed '/HTTP_STATUS:/d')
+
+          echo "DEBUG: repo slug was: $REPO_SLUG"
+          echo "DEBUG: HTTP status was: $HTTP_STATUS"
+          echo "DEBUG: raw response was: $RESPONSE"
+
+          if ! echo "$RESPONSE" | jq -e 'type == "array"' > /dev/null 2>&1; then
+            echo "http_status=$HTTP_STATUS" >> "$GITHUB_OUTPUT"
+            echo "error_msg=$(echo "$RESPONSE" | jq -r '.message // "Unrecognized response from GitHub API"' 2>/dev/null)" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          echo "$RESPONSE" > pulls.json
+
+      # ------------------------------------------------------------
+      # 2. Evaluate submission
+      #
+      # Checks:
+      #   - at least one merged PR exists targeting main
+      #   - it has a non-empty title
+      #   - it has a non-empty description (body)
+      # ------------------------------------------------------------
+      - name: Run evaluation
+        if: steps.fetch.outcome == 'success'
+        run: |
+          mkdir -p reports
+
+          SUBMISSION_ID="${{ github.event.client_payload.submission_id }}"
+
+          if [ "$(cat pulls.json)" = "[]" ]; then
+            cat > reports/$SUBMISSION_ID.json <<EOF
+          {
+            "submission_id": "$SUBMISSION_ID",
+            "passed": 0,
+            "total": 3,
+            "error": "No closed pull requests targeting main were found."
+          }
+          EOF
+            exit 0
+          fi
+
+          MERGED_PR=$(jq '[.[] | select(.merged_at != null)] | first' pulls.json)
+
+          if [ "$MERGED_PR" = "null" ] || [ -z "$MERGED_PR" ]; then
+            cat > reports/$SUBMISSION_ID.json <<EOF
+          {
+            "submission_id": "$SUBMISSION_ID",
+            "passed": 0,
+            "total": 3,
+            "results": {
+              "merged_pr_found": false
+            },
+            "error": "Pull requests were found, but none have been merged."
+          }
+          EOF
+            exit 0
+          fi
+
+          TITLE=$(echo "$MERGED_PR" | jq -r '.title')
+          BODY=$(echo "$MERGED_PR" | jq -r '.body // ""')
+
+          PASSED=1
+          TOTAL=3
+
+          if [ -n "$TITLE" ] && [ "$TITLE" != "null" ]; then
+            TITLE_CHECK="true"
+            PASSED=$((PASSED + 1))
+          else
+            TITLE_CHECK="false"
+          fi
+
+          if [ -n "$BODY" ] && [ "$BODY" != "null" ] && [ ${#BODY} -ge 10 ]; then
+            BODY_CHECK="true"
+            PASSED=$((PASSED + 1))
+          else
+            BODY_CHECK="false"
+          fi
+
+          cat > reports/$SUBMISSION_ID.json <<EOF
+          {
+            "submission_id": "$SUBMISSION_ID",
+            "passed": $PASSED,
+            "total": $TOTAL,
+            "results": {
+              "merged_pr_found": true,
+              "has_title": $TITLE_CHECK,
+              "has_description": $BODY_CHECK,
+              "pr_title": $(echo "$TITLE" | jq -R .)
+            }
+          }
+          EOF
+
+      # ------------------------------------------------------------
+      # 3. API call failed (bad token, wrong repo, rate limit, etc.)
+      # ------------------------------------------------------------
+      - name: Generate API error report
+        if: steps.fetch.outcome != 'success'
+        run: |
+          mkdir -p reports
+
+          SUBMISSION_ID="${{ github.event.client_payload.submission_id }}"
+
+          cat > reports/$SUBMISSION_ID.json <<EOF
+          {
+            "submission_id": "$SUBMISSION_ID",
+            "passed": 0,
+            "total": 3,
+            "error": "GitHub API request failed (HTTP ${{ steps.fetch.outputs.http_status }}): ${{ steps.fetch.outputs.error_msg }}"
+          }
+          EOF
+
+      # ------------------------------------------------------------
+      # 4. Upload report
+      # ------------------------------------------------------------
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-${{ github.event.client_payload.submission_id }}
+          path: reports/${{ github.event.client_payload.submission_id }}.json
+
+      # ------------------------------------------------------------
+      # 5. Notify backend
+      # ------------------------------------------------------------
+      - name: Send result to backend
+        if: always()
+        run: |
+          curl --fail -X POST "${{ secrets.BACKEND_URL }}/api/submissions/callback" \
+            -H "Content-Type: application/json" \
+            -H "X-Callback-Secret: ${{ secrets.CALLBACK_SECRET }}" \
+            -d @reports/${{ github.event.client_payload.submission_id }}.json
